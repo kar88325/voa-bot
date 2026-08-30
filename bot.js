@@ -1,5 +1,8 @@
-const fs = require('fs')
-const { makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys')
+import fs from 'fs'
+import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys'
+import pino from 'pino'
+
+const PHONE = process.env.PHONE_NUMBER || "91XXXXXXXXXX" // Set this in Koyeb env
 
 const bylawsText = fs.readFileSync('./bylawsVOAOA.txt', 'utf-8')
 const clauses = bylawsText.split(/\n(?=\d+\.\s+[A-Z ]+:)/)
@@ -18,23 +21,27 @@ async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('auth')
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
-    browser: ["VOA-Bot","Chrome","1.0"]
+    logger: pino({ level: 'silent' }),
+    browser: ["Chrome","Windows","10"],
+    syncFullHistory: false,
   })
 
-  // THIS IS FOR RAILWAY - Pairing code instead of QR
-  if(!sock.authState.creds.registered) {
-    const phone = "919986702515"
+  if(!state.creds.registered) {
     setTimeout(async ()=>{
-      let code = await sock.requestPairingCode(phone)
-      console.log("PAIRING CODE: ", code) // You will see this in Railway logs
-    }, 3000)
+      const code = await sock.requestPairingCode(PHONE.replace(/\D/g,''))
+      console.log(`\nPAIRING CODE FOR ${PHONE}: ${code}\n`)
+      console.log("Go to WhatsApp > Linked Devices > Link with phone number > Enter code")
+    }, 4000)
   }
 
   sock.ev.on('creds.update', saveCreds)
-
-  sock.ev.on('connection.update', ({connection})=>{
+  sock.ev.on('connection.update', (u)=>{
+    const { connection, lastDisconnect } = u
     if(connection==='open') console.log("✅ VOAOA Bot ONLINE")
+    if(connection==='close' && lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut) {
+      console.log("Reconnecting...")
+      start()
+    }
   })
 
   sock.ev.on('messages.upsert', async ({messages})=>{
@@ -50,11 +57,9 @@ async function start() {
       return
     }
     const clause = findBestClause(question)
-    const heading = clause? clause.split('\n')[0].slice(0,120) : ""
     const reply = clause
-     ? `*VOAOA Bye-laws:*\n\n"${clause.trim().slice(0,1000)}"\n\n*Ref:* ${heading}`
-      : "Not found in bye-laws. Try /vobylaws maintenance"
-
+    ? `*VOAOA Bye-laws:*\n\n"${clause.trim().slice(0,1000)}"\n\n*Ref:* ${clause.split('\n')[0].slice(0,120)}`
+      : "Not found in bye-laws. Try keywords like: maintenance, common areas, quorum"
     await sock.sendMessage(from, {text: reply}, {quoted:m})
   })
 }
