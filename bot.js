@@ -46,30 +46,35 @@ function findTopClauses(q, topN=3) {
 
 async function askGroq(question, relevantClauses) {
   if(!relevantClauses.length) return null
-
   const prompt = `You are VOAOA Bye-laws assistant for Vaishnavi Oasis Apartment.
+Question: "${question}"
+Relevant Clauses:
+${relevantClauses.map((c,i)=>`Clause ${i+1}: ${c.slice(0,1500)}`).join('\n\n---\n\n')}
+Answer in simple English based ONLY on clauses. Max 4 lines. End with Ref: heading. If not found, say "Not found in bye-laws".`
 
-  Question: "${question}"
+  const models = [
+    "llama-3.1-8b-instant",
+    "openai/gpt-oss-20b",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "llama-3.3-70b-versatile"
+  ]
 
-  Relevant Bye-laws Clauses:
-  ${relevantClauses.map((c,i)=>`Clause ${i+1}: ${c.slice(0,1500)}`).join('\n\n---\n\n')}
-
-  Task: Answer the question in simple English based ONLY on the clauses above. If clauses say Managing Committee can take small decisions without GBM, say that clearly. Be concise (max 4 lines). End with Ref: Clause heading.
-  If not found in clauses, say "Not found in bye-laws".
-  `
-
-  try {
-    const chat = await groq.chat.completions.create({
-      messages: [{ role: "user", content: prompt }],
-      model: "llama-3.1-8b-instant",
-      temperature: 0.1,
-      max_tokens: 300,
-    })
-    return chat.choices[0]?.message?.content
-  } catch(e) {
-    console.log("Groq error", e.message)
-    return null
+  for(let model of models) {
+    try {
+      console.log(`Trying Groq model: ${model}`)
+      const chat = await groq.chat.completions.create({
+        messages: [{ role: "user", content: prompt }],
+        model,
+        temperature: 0.1,
+        max_tokens: 300,
+      })
+      return chat.choices[0]?.message?.content
+    } catch(e) {
+      console.log(`Model ${model} failed: ${e.message}`)
+      continue
+    }
   }
+  return null
 }
 
 async function start() {
