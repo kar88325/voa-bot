@@ -26,8 +26,8 @@ function expandQuery(q) {
   return lower
 }
 
-function findTopClauses(q, topN=3) {
-  const expanded = expandQuery(q)
+function findTopClauses(q, topN=5) {
+  const expanded = expandQuery(q) + " agenda notice order business chairperson powers meeting procedure conduct"
   const queryWords = expanded.toLowerCase().split(/\W+/).filter(w=>w.length>2)
 
   let scored = clauses.map(c => {
