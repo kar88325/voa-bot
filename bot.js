@@ -6,70 +6,134 @@ import Groq from 'groq-sdk'
 const PHONE = process.env.PHONE_NUMBER
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
+// --- Load Bye-laws ---
 const bylawsText = fs.readFileSync('./bylawsVOAOA.txt', 'utf-8')
-// Better splitting - split by Clause No.
 const clauses = bylawsText.split(/\n(?=\d+[\.\)]\s+[A-Z]|\n[A-Z ]+:$)/).filter(c=>c.trim().length>100)
 
+// --- Load Cache ---
+let cache = {}
+try { cache = JSON.parse(fs.readFileSync('./cache.json','utf-8')); console.log(`Cache loaded: ${Object.keys(cache).length} entries`) } catch{}
+
+// --- Synonyms ---
 const SYNONYMS = {
   "gbm": "general body meeting",
   "agm": "annual general body meeting",
   "egm": "extra ordinary general body meeting",
   "mc": "managing committee executive committee",
   "ec": "managing committee",
-  "small decisions": "managing committee powers duties routine minor",
-  "major": "general body approval",
+  "small decisions": "managing committee powers routine minor day to day",
+  "agenda": "agenda notice order business",
 }
 
 function expandQuery(q) {
   let lower = q.toLowerCase()
   for(let k in SYNONYMS) if(lower.includes(k)) lower += " " + SYNONYMS[k]
-  return lower
+  return lower + " agenda notice order business chairperson powers meeting procedure"
 }
 
+// --- Retrieval ---
 function findTopClauses(q, topN=5) {
-  const expanded = expandQuery(q) + " agenda notice order business chairperson powers meeting procedure conduct"
+  const expanded = expandQuery(q)
   const queryWords = expanded.toLowerCase().split(/\W+/).filter(w=>w.length>2)
-
   let scored = clauses.map(c => {
     const lower = c.toLowerCase()
     const heading = c.split('\n').slice(0,2).join(' ').toLowerCase()
     let score = 0
-    queryWords.forEach(w => {
-      if(heading.includes(w)) score += 10
-      if(lower.includes(w)) score += 1
-    })
+    queryWords.forEach(w => { if(heading.includes(w)) score+=10; if(lower.includes(w)) score+=1 })
     return { text: c.trim(), score }
   })
   scored.sort((a,b)=>b.score-a.score)
   return scored.slice(0, topN).filter(s=>s.score>0).map(s=>s.text)
 }
 
+// --- Semantic Cache Level 1: Jaccard ---
+function jaccard(a,b) {
+  const wA = new Set(a.toLowerCase().split(/\W+/).filter(w=>w.length>2))
+  const wB = new Set(b.toLowerCase().split(/\W+/).filter(w=>w.length>2))
+  const inter = [...wA].filter(w=>wB.has(w)).length
+  const union = new Set([...wA,...wB]).size
+  return union===0?0:inter/union
+}
+
+function cosine(a,b) {
+  let dot=0, magA=0, magB=0
+  for(let i=0;i<a.length;i++){ dot+=a[i]*b[i]; magA+=a[i]*a[i]; magB+=b[i]*b[i] }
+  return dot / (Math.sqrt(magA)*Math.sqrt(magB) + 1e-8)
+}
+
+async function getEmbedding(text) {
+  try {
+    const res = await groq.embeddings.create({
+      model: "nomic-embed-text",
+      input: text
+    })
+    return res.data[0].embedding
+  } catch(e) {
+    console.log("Embedding failed, using Jaccard only:", e.message)
+    return null
+  }
+}
+
+async function getFromCache(question) {
+  const normQ = expandQuery(question)
+  // 24h expiry
+  for(let k in cache) if(Date.now()-cache[k].ts > 86400000) delete cache[k]
+
+  // Level 1: Fast Jaccard
+  for(let key in cache) {
+    if(jaccard(normQ, cache[key].norm) > 0.82) {
+      console.log(`CACHE HIT L1 Jaccard: "${key}" ~ "${question}"`)
+      return cache[key].answer
+    }
+  }
+  // Level 2: Embedding intent
+  const embQ = await getEmbedding(normQ)
+  if(embQ) {
+    for(let key in cache) {
+      if(cache[key].embedding && cosine(embQ, cache[key].embedding) > 0.85) {
+        console.log(`CACHE HIT L2 Embedding: "${key}" ~ "${question}"`)
+        return cache[key].answer
+      }
+    }
+  }
+  return null
+}
+
+async function saveToCache(question, answer) {
+  const norm = expandQuery(question)
+  const embedding = await getEmbedding(norm)
+  cache[question] = { norm, embedding, answer, ts: Date.now() }
+  fs.writeFileSync('./cache.json', JSON.stringify(cache, null, 2))
+  console.log("Cached:", question)
+}
+
+// --- Reasoning Groq ---
 async function askGroq(question, relevantClauses) {
-  if(!relevantClauses.length) return "Not found in bye-laws."
+  if(!relevantClauses.length) return "Not found in bye-laws. Try rephrasing with keywords like managing committee, general body, notice."
 
   const prompt = `
-You are a senior apartment association legal advisor for VOAOA.
+You are senior VOAOA legal advisor for Vaishnavi Oasis Apartment (JP Nagar 9th Phase).
 
 QUESTION: "${question}"
 
-RELEVANT BYE-LAWS (may be incomplete, use your understanding of standard bye-laws):
+RELEVANT BYE-LAWS:
 ${relevantClauses.map((c,i)=>`--- CLAUSE ${i+1} ---\n${c.slice(0,2000)}`).join('\n\n')}
 
-INSTRUCTIONS - Think step by step:
-1. What is the USER'S REAL INTENT? (e.g., "is change in agenda order legally valid?")
-2. What does bye-laws say about: Agenda, Notice, Order of Business, Powers of Chairperson to conduct meeting, Consent of members present?
-3. Deduce: Is mere change in order a violation if all notified topics were still discussed? When would it be NOT allowed (if it prejudices members, if something was skipped)?
-4. Give final answer in simple English: YES/NO + why. Cite clauses.
-5. Keep to 5-6 lines max. Must end with Ref: <clause headings>.
+Think step by step:
+1. What is REAL INTENT? (e.g., validity of changing agenda order)
+2. What do clauses say about agenda, notice, order of business, chairperson power to regulate meeting, consent of members?
+3. Standard apartment law: if agenda notified, mere change in order is allowed if all items covered, no prejudice, with consent. Not allowed if item skipped or prejudice caused.
+4. Answer: YES/NO + reasoning in 5 lines simple English. End with Ref: <headings>.
 
-If bye-laws are silent on order, say: "Bye-laws do not explicitly forbid change in order, Chairperson may regulate business with consent of meeting, provided all notified agenda items are covered and no member is prejudiced."
+If silent, say: "Bye-laws do not explicitly forbid change in order, Chairperson may regulate business with consent, provided all notified items covered."
 `
 
   const models = [
-    "openai/gpt-oss-120b",  // <- best reasoning for free
-    "groq/compound",         // <- agentic thinking
-    "qwen/qwen3-32b",        // <- good thinker, 60 RPM free
-    "meta-llama/llama-4-maverick-17b-128e-instruct"
+    "openai/gpt-oss-120b",
+    "groq/compound",
+    "qwen/qwen3-32b",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "openai/gpt-oss-20b"
   ]
 
   for(let model of models) {
@@ -79,17 +143,17 @@ If bye-laws are silent on order, say: "Bye-laws do not explicitly forbid change 
         messages: [{ role: "user", content: prompt }],
         model,
         temperature: 0.2,
-        max_tokens: 600, // allow thinking
+        max_tokens: 600,
       })
       return chat.choices[0]?.message?.content
     } catch(e) {
-      console.log(`Model ${model} failed: ${e.message}`)
-      continue
+      console.log(`Model ${model} failed: ${e.message}`); continue
     }
   }
   return null
 }
 
+// --- WhatsApp Start ---
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('auth')
   const { version } = await fetchLatestBaileysVersion()
@@ -115,7 +179,7 @@ async function start() {
         console.log(`\n\n========== PAIRING CODE: ${code} ==========\n`)
       } catch(e) { pairingDone = false }
     }
-    if(connection==='open') console.log("✅ VOAOA Bot ONLINE with Groq")
+    if(connection==='open') console.log("✅ VOAOA Bot ONLINE with Reasoning + Semantic Cache")
     if(connection==='close' && lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut) {
       setTimeout(start, 3000)
     }
@@ -137,18 +201,18 @@ async function start() {
     console.log(`Q: ${question}`)
     await sock.sendPresenceUpdate('composing', from)
 
-    const topClauses = findTopClauses(question, 3)
-    const answer = await askGroq(question, topClauses)
-
-    let reply
-    if(answer) {
-      reply = `*VOAOA Bye-laws Answer:*\n\n${answer}\n\n_Type /vobylaws <your question>_`
-    } else {
-      reply = topClauses[0]
-       ? `*Relevant Clause:*\n\n${topClauses[0].slice(0,1200)}`
-        : "Not found in bye-laws. Try: /vobylaws managing committee powers"
+    // Check cache first
+    const cached = await getFromCache(question)
+    if(cached) {
+      await sock.sendMessage(from, {text: `*VOAOA Bye-laws (from cache):*\n\n${cached}\n\n_Type /vobylaws <question>_`}, {quoted:m})
+      return
     }
 
+    const topClauses = findTopClauses(question, 5)
+    const answer = await askGroq(question, topClauses)
+    const reply = answer? `*VOAOA Bye-laws Answer:*\n\n${answer}\n\n_Type /vobylaws <question>_` : "Not found."
+
+    await saveToCache(question, answer || reply)
     await sock.sendMessage(from, {text: reply}, {quoted:m})
   })
 }
