@@ -2,9 +2,9 @@
   "name": "voa-bot",
   "version": "1.0.0",
   "type": "module",
-  "main": "bot.js",
   "dependencies": {
     "@whiskeysockets/baileys": "6.7.18",
+    "qrcode-terminal": "^0.12.0",
     "pino": "^9.0.0"
   }
 }
