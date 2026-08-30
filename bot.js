@@ -45,28 +45,41 @@ function findTopClauses(q, topN=3) {
 }
 
 async function askGroq(question, relevantClauses) {
-  if(!relevantClauses.length) return null
-  const prompt = `You are VOAOA Bye-laws assistant for Vaishnavi Oasis Apartment.
-Question: "${question}"
-Relevant Clauses:
-${relevantClauses.map((c,i)=>`Clause ${i+1}: ${c.slice(0,1500)}`).join('\n\n---\n\n')}
-Answer in simple English based ONLY on clauses. Max 4 lines. End with Ref: heading. If not found, say "Not found in bye-laws".`
+  if(!relevantClauses.length) return "Not found in bye-laws."
+
+  const prompt = `
+You are a senior apartment association legal advisor for VOAOA.
+
+QUESTION: "${question}"
+
+RELEVANT BYE-LAWS (may be incomplete, use your understanding of standard bye-laws):
+${relevantClauses.map((c,i)=>`--- CLAUSE ${i+1} ---\n${c.slice(0,2000)}`).join('\n\n')}
+
+INSTRUCTIONS - Think step by step:
+1. What is the USER'S REAL INTENT? (e.g., "is change in agenda order legally valid?")
+2. What does bye-laws say about: Agenda, Notice, Order of Business, Powers of Chairperson to conduct meeting, Consent of members present?
+3. Deduce: Is mere change in order a violation if all notified topics were still discussed? When would it be NOT allowed (if it prejudices members, if something was skipped)?
+4. Give final answer in simple English: YES/NO + why. Cite clauses.
+5. Keep to 5-6 lines max. Must end with Ref: <clause headings>.
+
+If bye-laws are silent on order, say: "Bye-laws do not explicitly forbid change in order, Chairperson may regulate business with consent of meeting, provided all notified agenda items are covered and no member is prejudiced."
+`
 
   const models = [
-    "llama-3.1-8b-instant",
-    "openai/gpt-oss-20b",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "llama-3.3-70b-versatile"
+    "openai/gpt-oss-120b",  // <- best reasoning for free
+    "groq/compound",         // <- agentic thinking
+    "qwen/qwen3-32b",        // <- good thinker, 60 RPM free
+    "meta-llama/llama-4-maverick-17b-128e-instruct"
   ]
 
   for(let model of models) {
     try {
-      console.log(`Trying Groq model: ${model}`)
+      console.log(`Trying reasoning model: ${model}`)
       const chat = await groq.chat.completions.create({
         messages: [{ role: "user", content: prompt }],
         model,
-        temperature: 0.1,
-        max_tokens: 300,
+        temperature: 0.2,
+        max_tokens: 600, // allow thinking
       })
       return chat.choices[0]?.message?.content
     } catch(e) {
