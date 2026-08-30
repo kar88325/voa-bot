@@ -1,0 +1,9 @@
+{
+  "name": "voa-bot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.8",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
