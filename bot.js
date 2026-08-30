@@ -1,6 +1,8 @@
 import fs from 'fs'
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys'
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys'
 import pino from 'pino'
+
+const PHONE = process.env.PHONE_NUMBER || "91XXXXXXXXXX"
 
 const bylawsText = fs.readFileSync('./bylawsVOAOA.txt', 'utf-8')
 const clauses = bylawsText.split(/\n(?=\d+\.\s+[A-Z ]+:)/)
@@ -17,36 +19,44 @@ function findBestClause(q) {
 
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('auth')
+  const { version } = await fetchLatestBaileysVersion()
 
   const sock = makeWASocket({
+    version,
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
-    browser: ["Chrome","Windows","10"],
+    browser: ["Ubuntu","Chrome","110.0.5481.178"],
     syncFullHistory: false,
-    markOnlineOnConnect: false,
-    keepAliveIntervalMs: 30000
   })
-
-  if(!state.creds.registered) {
-    const phone = "91XXXXXXXXXX" // YOUR BOT NUMBER
-    setTimeout(async ()=>{
-      try {
-        let code = await sock.requestPairingCode(phone.replace(/\D/g,''))
-        console.log(`\n\n >>> PAIRING CODE FOR ${phone}: ${code} <<<\n\n`)
-      } catch(e){ console.log("Pairing error", e) }
-    }, 5000)
-  }
 
   sock.ev.on('creds.update', saveCreds)
 
+  // FIX FOR 428 ERROR - Request pairing ONLY after WS connects
+  let pairingDone = false
   sock.ev.on('connection.update', async (update)=>{
     const { connection, lastDisconnect } = update
-    if(connection === 'open') console.log("✅ VOAOA Bot ONLINE")
-    if(connection === 'close') {
+
+    if(!state.creds.registered &&!pairingDone && connection!== 'close') {
+      pairingDone = true
+      console.log("Waiting 8 sec for WhatsApp connection...")
+      await new Promise(r=>setTimeout(r, 8000)) // MUST WAIT
+      try {
+        const code = await sock.requestPairingCode(PHONE.replace(/\D/g,''))
+        console.log(`\n\n========== PAIRING CODE: ${code} ==========\n`)
+        console.log(`For ${PHONE} - Enter in WhatsApp > Linked Devices > Link with phone number\n\n`)
+      } catch(e) {
+        console.log("Pairing failed, will retry...", e.message)
+        pairingDone = false // allow retry
+      }
+    }
+
+    if(connection==='open') console.log("✅ VOAOA Bot ONLINE - Ready for /vobylaws")
+    if(connection==='close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut
-      console.log("Connection closed, reconnecting:", shouldReconnect)
-      if(shouldReconnect) start()
+      if(shouldReconnect) {
+        console.log("Reconnecting in 3s...")
+        setTimeout(start, 3000)
+      }
     }
   })
 
@@ -60,7 +70,7 @@ async function start() {
     const from = m.key.remoteJid
     const clause = findBestClause(question)
     const reply = clause
-     ? `*VOAOA Bye-laws:*\n\n"${clause.trim().slice(0,1000)}"\n\n*Ref:* ${clause.split('\n')[0].slice(0,120)}`
+   ? `*VOAOA Bye-laws:*\n\n"${clause.trim().slice(0,1000)}"\n\n*Ref:* ${clause.split('\n')[0].slice(0,120)}`
       : "Not found in bye-laws."
     await sock.sendMessage(from, {text: reply}, {quoted:m})
   })
