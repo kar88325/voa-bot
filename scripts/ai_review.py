@@ -101,7 +101,7 @@ def run_bob(prompt: str) -> str:
             "Add it as a GitHub Secret named BOB_API_KEY."
         )
 
-    cmd = [BOB_BIN, "--auth-method", "api-key", "-p", prompt]
+    cmd = [BOB_BIN, "--accept-license", "-p", prompt]
 
     try:
         result = subprocess.run(
