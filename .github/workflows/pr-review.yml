@@ -1,0 +1,155 @@
+# ============================================================
+# Intelligent PR Reviewer  (AI-Powered Edition)
+# Triggered on every pull_request event targeting the default
+# branch.  Runs static analysis AND an AI-powered Bob Shell
+# review, then posts a unified prioritised report as a PR comment.
+#
+# Required GitHub Secrets:
+#   BOB_API_KEY  –  Inference-scoped API key from bob.ibm.com
+# ============================================================
+name: Intelligent PR Reviewer
+
+on:
+  pull_request:
+    branches: [ main, master ]
+    types: [ opened, synchronize, reopened ]
+
+permissions:
+  pull-requests: write   # post the review comment
+  contents: read
+
+jobs:
+  review:
+    name: AI-Powered Code Review
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout full history so the diff is available ──────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Set up Python ────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── 3. Install static-analysis tools ───────────────────────────
+      - name: Install static analysis dependencies
+        run: |
+          pip install --quiet \
+            bandit==1.7.9 \
+            pylint==3.2.6 \
+            pyflakes==3.2.0 \
+            requests==2.32.3
+
+      # ── 4. Install Bob Shell ────────────────────────────────────────
+      - name: Install Bob Shell
+        run: curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash
+
+      # ── 5. Collect changed Python files ────────────────────────────
+      - name: Collect changed Python files
+        id: changed
+        run: |
+          BASE=${{ github.event.pull_request.base.sha }}
+          HEAD=${{ github.event.pull_request.head.sha }}
+          FILES=$(git diff --name-only "$BASE" "$HEAD" -- '*.py' | tr '\n' ' ')
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "Changed Python files: $FILES"
+
+      # ── 6. Export the unified diff (for Bob to read) ───────────────
+      - name: Export PR diff
+        if: steps.changed.outputs.files != ''
+        run: |
+          BASE=${{ github.event.pull_request.base.sha }}
+          HEAD=${{ github.event.pull_request.head.sha }}
+          git diff "$BASE" "$HEAD" -- '*.py' > pr.diff
+          echo "Diff size: $(wc -l < pr.diff) lines"
+
+      # ── 7. Run Bandit (security) ────────────────────────────────────
+      - name: Run Bandit security scan
+        if: steps.changed.outputs.files != ''
+        run: |
+          python -m bandit -r ${{ steps.changed.outputs.files }} \
+            --format json \
+            --output bandit-report.json \
+            --severity-level low \
+            --confidence-level low || true
+
+      # ── 8. Run Pylint (quality) ─────────────────────────────────────
+      - name: Run Pylint quality scan
+        if: steps.changed.outputs.files != ''
+        run: |
+          python -m pylint ${{ steps.changed.outputs.files }} \
+            --output-format=json \
+            --disable=C0114,C0115,C0116 \
+            > pylint-report.json 2>&1 || true
+
+      # ── 9. Run Pyflakes (logic / unused code) ───────────────────────
+      - name: Run Pyflakes
+        if: steps.changed.outputs.files != ''
+        run: |
+          python -m pyflakes ${{ steps.changed.outputs.files }} \
+            > pyflakes-report.txt 2>&1 || true
+
+      # ── 10. AI Review via Bob Shell ─────────────────────────────────
+      # Bob Shell reads the diff file and returns a structured AI review.
+      # Authentication uses an Inference-scoped API key stored in Secrets.
+      - name: AI-powered review with Bob Shell
+        if: steps.changed.outputs.files != ''
+        env:
+          BOBSHELL_API_KEY: ${{ secrets.BOB_API_KEY }}
+        run: |
+          python scripts/ai_review.py \
+            --diff    pr.diff \
+            --files   "${{ steps.changed.outputs.files }}" \
+            --output  ai-review.md
+
+      # ── 11. Aggregate all results → Markdown report ─────────────────
+      - name: Generate unified review report
+        if: steps.changed.outputs.files != ''
+        env:
+          FILES: ${{ steps.changed.outputs.files }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python scripts/review.py \
+            --bandit    bandit-report.json \
+            --pylint    pylint-report.json \
+            --pyflakes  pyflakes-report.txt \
+            --ai        ai-review.md \
+            --files     "$FILES" \
+            --pr        "$PR_NUMBER" \
+            --title     "$PR_TITLE" \
+            --author    "$AUTHOR" \
+            --sha       "$COMMIT_SHA" \
+            --output    review-comment.md || true
+
+      # ── 12. Post the unified report as a PR comment ─────────────────
+      - name: Post review comment
+        if: steps.changed.outputs.files != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('review-comment.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body,
+            });
+
+      # ── 13. Quality gate — block on CRITICAL findings ────────────────
+      - name: Quality gate — block on critical findings
+        if: steps.changed.outputs.files != ''
+        run: |
+          if grep -q "🔴 CRITICAL" review-comment.md; then
+            echo "❌ Quality gate FAILED: critical issues detected. See the PR comment for details."
+            exit 1
+          fi
+          echo "✅ Quality gate passed."
