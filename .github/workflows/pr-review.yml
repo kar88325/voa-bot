@@ -45,9 +45,17 @@ jobs:
             pyflakes==3.2.0 \
             requests==2.32.3
 
-      # ── 4. Install Bob Shell ────────────────────────────────────────
+      # ── 4. Install Bob Shell (non-interactive) ──────────────────────
+      # Setting BOBSHELL_API_KEY *before* the install script runs tells
+      # the installer to skip the interactive auth-method prompt.
+      # --accept-license suppresses the first-run license agreement.
       - name: Install Bob Shell
-        run: curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash
+        env:
+          BOBSHELL_API_KEY: ${{ secrets.BOB_API_KEY }}
+        run: |
+          curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash
+          echo "$HOME/.bob/bin" >> "$GITHUB_PATH"
+          bob --auth-method api-key --accept-license -p "ping" || true
 
       # ── 5. Collect changed Python files ────────────────────────────
       - name: Collect changed Python files
